@@ -1,0 +1,47 @@
+services:
+  server-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    command: ["python", "server.py", "server-1"]
+    volumes:
+      - server-1-data:/data
+
+  server-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    command: ["python", "server.py", "server-2"]
+    volumes:
+      - server-2-data:/data
+
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    command: ["python", "broker.py"]
+    ports:
+      - "5555:5555"
+    depends_on:
+      - server-1
+      - server-2
+
+  client-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+    command: ["bot-java-1", "general"]
+    depends_on:
+      - broker
+
+  client-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.java
+    command: ["bot-java-2", "random"]
+    depends_on:
+      - broker
+
+volumes:
+  server-1-data:
+  server-2-data:
