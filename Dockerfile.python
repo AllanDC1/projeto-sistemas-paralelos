@@ -1,0 +1,13 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY protocol/chat.proto /app/protocol/chat.proto
+RUN python -m grpc_tools.protoc -I/app/protocol --python_out=/app /app/protocol/chat.proto
+
+COPY broker.py server.py ./
+
+CMD ["python", "server.py"]

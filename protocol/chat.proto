@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package chat.v1;
+
+option java_package = "chat.protocol";
+option java_multiple_files = true;
+
+message Envelope {
+  int64 sent_at_unix_ms = 1;
+
+  oneof payload {
+    LoginRequest login_request = 2;
+    LoginResponse login_response = 3;
+    CreateChannelRequest create_channel_request = 4;
+    CreateChannelResponse create_channel_response = 5;
+    ListChannelsRequest list_channels_request = 6;
+    ChannelListResponse channel_list_response = 7;
+    ErrorResponse error_response = 8;
+  }
+}
+
+message LoginRequest {
+  string username = 1;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message CreateChannelRequest {
+  string username = 1;
+  string channel_name = 2;
+}
+
+message CreateChannelResponse {
+  bool success = 1;
+  string error = 2;
+  string channel_name = 3;
+}
+
+message ListChannelsRequest {
+  string username = 1;
+}
+
+message ChannelListResponse {
+  repeated string channels = 1;
+}
+
+message ErrorResponse {
+  string error = 1;
+}
