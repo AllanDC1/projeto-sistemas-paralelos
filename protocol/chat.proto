@@ -7,6 +7,7 @@ option java_multiple_files = true;
 
 message Envelope {
   int64 sent_at_unix_ms = 1;
+  int64 logical_clock = 12;
 
   oneof payload {
     LoginRequest login_request = 2;
@@ -19,6 +20,12 @@ message Envelope {
     PublishRequest publish_request = 9;
     PublishResponse publish_response = 10;
     ChannelMessage channel_message = 11;
+    RegisterServerRequest register_server_request = 13;
+    RegisterServerResponse register_server_response = 14;
+    ListServersRequest list_servers_request = 15;
+    ListServersResponse list_servers_response = 16;
+    HeartbeatRequest heartbeat_request = 17;
+    HeartbeatResponse heartbeat_response = 18;
   }
 }
 
@@ -69,4 +76,32 @@ message ChannelMessage {
   string username = 1;
   string channel_name = 2;
   string message = 3;
+}
+
+message RegisterServerRequest {
+  string server_name = 1;
+}
+
+message RegisterServerResponse {
+  int32 rank = 1;
+}
+
+message ListServersRequest {}
+
+message ServerInfo {
+  string server_name = 1;
+  int32 rank = 2;
+}
+
+message ListServersResponse {
+  repeated ServerInfo servers = 1;
+}
+
+message HeartbeatRequest {
+  string server_name = 1;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  int64 server_time_unix_ms = 2;
 }

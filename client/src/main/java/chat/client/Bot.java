@@ -11,12 +11,14 @@ import chat.protocol.PublishResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicLong;
 import org.zeromq.SocketType;
 import org.zeromq.ZContext;
 import org.zeromq.ZMQ;
 
 public final class Bot {
     private static final Random RANDOM = new Random();
+    private static final AtomicLong LOGICAL_CLOCK = new AtomicLong();
     private static final List<String> MESSAGES = List.of(
             "Ola, canal!", "Mensagem do bot", "Testando publicacao", "ZeroMQ na pratica");
 
@@ -60,8 +62,7 @@ public final class Bot {
 
     private static void login(ZMQ.Socket socket, String username) throws Exception {
         while (true) {
-            Envelope request = Envelope.newBuilder()
-                    .setSentAtUnixMs(System.currentTimeMillis())
+            Envelope request = newEnvelope()
                     .setLoginRequest(LoginRequest.newBuilder().setUsername(username))
                     .build();
             Envelope response = exchange(socket, request);
@@ -75,8 +76,7 @@ public final class Bot {
 
     private static ChannelListResponse listChannels(ZMQ.Socket socket, String username)
             throws Exception {
-        Envelope request = Envelope.newBuilder()
-                .setSentAtUnixMs(System.currentTimeMillis())
+        Envelope request = newEnvelope()
                 .setListChannelsRequest(
                         ListChannelsRequest.newBuilder().setUsername(username))
                 .build();
@@ -85,8 +85,7 @@ public final class Bot {
 
     private static void createChannel(ZMQ.Socket socket, String username, String channelName)
             throws Exception {
-        Envelope request = Envelope.newBuilder()
-                .setSentAtUnixMs(System.currentTimeMillis())
+        Envelope request = newEnvelope()
                 .setCreateChannelRequest(CreateChannelRequest.newBuilder()
                         .setUsername(username).setChannelName(channelName))
                 .build();
@@ -96,8 +95,7 @@ public final class Bot {
     private static void publish(
             ZMQ.Socket socket, String username, String channelName, String message)
             throws Exception {
-        Envelope request = Envelope.newBuilder()
-                .setSentAtUnixMs(System.currentTimeMillis())
+        Envelope request = newEnvelope()
                 .setPublishRequest(PublishRequest.newBuilder()
                         .setUsername(username)
                         .setChannelName(channelName)
@@ -119,6 +117,7 @@ public final class Bot {
         while (true) {
             String topic = new String(subscriber.recv(0), StandardCharsets.UTF_8);
             Envelope publication = Envelope.parseFrom(subscriber.recv(0));
+            updateLogicalClock(publication);
             ChannelMessage message = publication.getChannelMessage();
             System.out.printf(
                     "Recebida no canal %s: usuario=%s mensagem=%s enviada_em=%d recebida_em=%d%n",
@@ -134,7 +133,18 @@ public final class Bot {
         System.out.printf("Enviada: %s%n", request);
         socket.send(request.toByteArray(), 0);
         Envelope response = Envelope.parseFrom(socket.recv(0));
+        updateLogicalClock(response);
         System.out.printf("Recebida: %s%n", response);
         return response;
+    }
+
+    private static Envelope.Builder newEnvelope() {
+        return Envelope.newBuilder()
+                .setSentAtUnixMs(System.currentTimeMillis())
+                .setLogicalClock(LOGICAL_CLOCK.incrementAndGet());
+    }
+
+    private static void updateLogicalClock(Envelope message) {
+        LOGICAL_CLOCK.accumulateAndGet(message.getLogicalClock(), Math::max);
     }
 }

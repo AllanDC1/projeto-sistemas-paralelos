@@ -8,6 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY protocol/chat.proto /app/protocol/chat.proto
 RUN python -m grpc_tools.protoc -I/app/protocol --python_out=/app /app/protocol/chat.proto
 
-COPY broker.py proxy.py server.py ./
+COPY broker.py proxy.py reference.py server.py ./
 
 CMD ["python", "server.py"]

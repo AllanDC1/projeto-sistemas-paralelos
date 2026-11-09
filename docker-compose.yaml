@@ -6,6 +6,7 @@ services:
     command: ["python", "server.py", "server-1"]
     depends_on:
       - proxy
+      - reference
     volumes:
       - server-1-data:/data
 
@@ -16,6 +17,7 @@ services:
     command: ["python", "server.py", "server-2"]
     depends_on:
       - proxy
+      - reference
     volumes:
       - server-2-data:/data
 
@@ -38,6 +40,14 @@ services:
     ports:
       - "5557:5557"
       - "5558:5558"
+
+  reference:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+    command: ["python", "reference.py"]
+    ports:
+      - "5559:5559"
 
   client-1:
     build:
