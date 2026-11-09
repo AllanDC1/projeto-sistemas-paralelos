@@ -16,6 +16,9 @@ message Envelope {
     ListChannelsRequest list_channels_request = 6;
     ChannelListResponse channel_list_response = 7;
     ErrorResponse error_response = 8;
+    PublishRequest publish_request = 9;
+    PublishResponse publish_response = 10;
+    ChannelMessage channel_message = 11;
   }
 }
 
@@ -49,4 +52,21 @@ message ChannelListResponse {
 
 message ErrorResponse {
   string error = 1;
+}
+
+message PublishRequest {
+  string username = 1;
+  string channel_name = 2;
+  string message = 3;
+}
+
+message PublishResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ChannelMessage {
+  string username = 1;
+  string channel_name = 2;
+  string message = 3;
 }

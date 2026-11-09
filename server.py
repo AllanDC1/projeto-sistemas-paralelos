@@ -27,6 +27,15 @@ def create_database():
             created_at_unix_ms INTEGER NOT NULL,
             origin_server TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS publications (
+            username TEXT NOT NULL,
+            channel_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            request_sent_at_unix_ms INTEGER NOT NULL,
+            received_at_unix_ms INTEGER NOT NULL,
+            published_at_unix_ms INTEGER NOT NULL,
+            origin_server TEXT NOT NULL
+        );
         """
     )
     connection.commit()
@@ -39,7 +48,7 @@ def make_response(payload_field, payload, timestamp=None):
     return response
 
 
-def handle_request(request, connection, server_id):
+def handle_request(request, connection, server_id, publisher):
     payload = request.WhichOneof("payload")
 
     if payload == "login_request":
@@ -74,6 +83,49 @@ def handle_request(request, connection, server_id):
         )
         return make_response("channel_list_response", response)
 
+    if payload == "publish_request":
+        publication = request.publish_request
+        response = chat_pb2.PublishResponse()
+        channel = connection.execute(
+            "SELECT 1 FROM channels WHERE name = ?", (publication.channel_name,)
+        ).fetchone()
+        if channel is None:
+            response.error = "Canal inexistente."
+            return make_response("publish_response", response)
+
+        received_at = now_unix_ms()
+        published_at = now_unix_ms()
+        message = chat_pb2.Envelope(
+            sent_at_unix_ms=published_at,
+            channel_message=chat_pb2.ChannelMessage(
+                username=publication.username,
+                channel_name=publication.channel_name,
+                message=publication.message,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO publications VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                publication.username,
+                publication.channel_name,
+                publication.message,
+                request.sent_at_unix_ms,
+                received_at,
+                published_at,
+                server_id,
+            ),
+        )
+        connection.commit()
+        publisher.send_multipart(
+            [publication.channel_name.encode(), message.SerializeToString()]
+        )
+        print(
+            f"Publicada: {text_format.MessageToString(message, as_one_line=True)}",
+            flush=True,
+        )
+        response.success = True
+        return make_response("publish_response", response)
+
     return make_response(
         "error_response",
         chat_pb2.ErrorResponse(error="Tipo de requisicao desconhecido."),
@@ -87,6 +139,8 @@ def main():
     context = zmq.Context()
     socket = context.socket(zmq.REP)
     socket.bind("tcp://*:5556")
+    publisher = context.socket(zmq.PUB)
+    publisher.connect("tcp://proxy:5557")
     print(f"Servidor {server_id} escutando na porta 5556", flush=True)
 
     try:
@@ -98,7 +152,7 @@ def main():
                 f"Recebida: {text_format.MessageToString(request, as_one_line=True)}",
                 flush=True,
             )
-            response = handle_request(request, connection, server_id)
+            response = handle_request(request, connection, server_id, publisher)
             print(
                 f"Enviada: {text_format.MessageToString(response, as_one_line=True)}",
                 flush=True,
@@ -107,6 +161,7 @@ def main():
     finally:
         connection.close()
         socket.close()
+        publisher.close()
         context.term()
 
 
