@@ -55,9 +55,7 @@ def handle_request(request, ranks, last_heartbeat):
             last_heartbeat[name] = time.monotonic()
         return make_envelope(
             "heartbeat_response",
-            chat_pb2.HeartbeatResponse(
-                success=success, server_time_unix_ms=now_unix_ms()
-            ),
+            chat_pb2.HeartbeatResponse(success=success),
         )
 
     return make_envelope(

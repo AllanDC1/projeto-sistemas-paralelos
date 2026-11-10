@@ -26,6 +26,11 @@ message Envelope {
     ListServersResponse list_servers_response = 16;
     HeartbeatRequest heartbeat_request = 17;
     HeartbeatResponse heartbeat_response = 18;
+    ClockRequest clock_request = 19;
+    ClockResponse clock_response = 20;
+    ElectionRequest election_request = 21;
+    ElectionResponse election_response = 22;
+    CoordinatorAnnouncement coordinator_announcement = 23;
   }
 }
 
@@ -103,5 +108,26 @@ message HeartbeatRequest {
 
 message HeartbeatResponse {
   bool success = 1;
-  int64 server_time_unix_ms = 2;
+}
+
+message ClockRequest {
+  string server_name = 1;
+}
+
+message ClockResponse {
+  bool is_coordinator = 1;
+}
+
+message ElectionRequest {
+  string server_name = 1;
+  int32 rank = 2;
+}
+
+message ElectionResponse {
+  bool accepted = 1;
+}
+
+message CoordinatorAnnouncement {
+  string server_name = 1;
+  int32 rank = 2;
 }
