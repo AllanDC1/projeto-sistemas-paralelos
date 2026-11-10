@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import threading
 import time
 
 import zmq
@@ -10,6 +11,9 @@ import chat_pb2
 
 LOGICAL_CLOCK = 0
 CLOCK_OFFSET_MS = 0
+COORDINATOR_NAME = None
+SERVER_RANK = 0
+ACTIVE_SERVERS = []
 
 
 def now_unix_ms():
@@ -48,19 +52,179 @@ def reference_exchange(reference_socket, payload_field, payload):
     return response
 
 
-def synchronize_clock(reference_socket, server_id):
+def set_clock(target_time_ms):
     global CLOCK_OFFSET_MS
+    CLOCK_OFFSET_MS = target_time_ms - time.time_ns() // 1_000_000
+    print(f"Relogio sincronizado: {now_unix_ms()}", flush=True)
+
+
+def peer_exchange(context, server_name, payload_field, payload):
+    socket = context.socket(zmq.REQ)
+    socket.setsockopt(zmq.SNDTIMEO, 1_000)
+    socket.setsockopt(zmq.RCVTIMEO, 1_000)
+    socket.connect(f"tcp://{server_name}:5556")
+    request = make_envelope(payload_field, payload)
+    print(
+        f"Enviada a {server_name}: {text_format.MessageToString(request, as_one_line=True)}",
+        flush=True,
+    )
+    try:
+        socket.send(request.SerializeToString())
+        response = chat_pb2.Envelope()
+        response.ParseFromString(socket.recv())
+        update_logical_clock(response)
+        print(
+            f"Recebida de {server_name}: "
+            f"{text_format.MessageToString(response, as_one_line=True)}",
+            flush=True,
+        )
+        return response
+    except zmq.Again:
+        print(f"Servidor {server_name} nao respondeu", flush=True)
+        return None
+    finally:
+        socket.close(0)
+
+
+def announce_coordinator(publisher, server_id, server_rank):
+    global COORDINATOR_NAME
+    COORDINATOR_NAME = server_id
+    announcement = make_envelope(
+        "coordinator_announcement",
+        chat_pb2.CoordinatorAnnouncement(
+            server_name=server_id, rank=server_rank
+        ),
+    )
+    publisher.send_multipart([b"servers", announcement.SerializeToString()])
+    print(
+        f"Enviada no topico servers: "
+        f"{text_format.MessageToString(announcement, as_one_line=True)}",
+        flush=True,
+    )
+
+
+def get_active_servers(reference_socket):
     response = reference_exchange(
         reference_socket,
-        "heartbeat_request",
-        chat_pb2.HeartbeatRequest(server_name=server_id),
+        "list_servers_request",
+        chat_pb2.ListServersRequest(),
     )
-    if response.heartbeat_response.success:
-        CLOCK_OFFSET_MS = (
-            response.heartbeat_response.server_time_unix_ms
-            - time.time_ns() // 1_000_000
+    return list(response.list_servers_response.servers)
+
+
+def start_election(context, reference_socket, publisher, server_id, server_rank):
+    global ACTIVE_SERVERS, COORDINATOR_NAME
+    COORDINATOR_NAME = None
+    ACTIVE_SERVERS = get_active_servers(reference_socket)
+    higher_rank_servers = [
+        server
+        for server in ACTIVE_SERVERS
+        if server.rank > server_rank and server.server_name != server_id
+    ]
+    higher_rank_responded = False
+
+    for server in higher_rank_servers:
+        response = peer_exchange(
+            context,
+            server.server_name,
+            "election_request",
+            chat_pb2.ElectionRequest(server_name=server_id, rank=server_rank),
         )
-        print(f"Relogio sincronizado: {now_unix_ms()}", flush=True)
+        if response is not None and response.election_response.accepted:
+            higher_rank_responded = True
+
+    if not higher_rank_responded:
+        announce_coordinator(publisher, server_id, server_rank)
+
+
+def synchronize_berkeley(
+    context,
+    reference_socket,
+    server_id,
+    requester_name=None,
+    requester_time=None,
+):
+    global ACTIVE_SERVERS
+    ACTIVE_SERVERS = get_active_servers(reference_socket)
+    clock_values = [now_unix_ms()]
+    if requester_name is not None:
+        clock_values.append(requester_time)
+
+    for server in ACTIVE_SERVERS:
+        if server.server_name in (server_id, requester_name):
+            continue
+        started = time.monotonic()
+        response = peer_exchange(
+            context,
+            server.server_name,
+            "clock_request",
+            chat_pb2.ClockRequest(server_name=server_id),
+        )
+        if response is not None and response.HasField("clock_response"):
+            round_trip_ms = (time.monotonic() - started) * 1_000
+            clock_values.append(
+                response.sent_at_unix_ms + int(round_trip_ms / 2)
+            )
+
+    average_time = sum(clock_values) // len(clock_values)
+    set_clock(average_time)
+    return make_envelope(
+        "clock_response", chat_pb2.ClockResponse(is_coordinator=True)
+    )
+
+
+def synchronize_with_coordinator(
+    context, reference_socket, publisher, server_id, server_rank
+):
+    if COORDINATOR_NAME == server_id:
+        synchronize_berkeley(context, reference_socket, server_id)
+        return
+
+    if COORDINATOR_NAME is None:
+        start_election(
+            context, reference_socket, publisher, server_id, server_rank
+        )
+        if COORDINATOR_NAME == server_id:
+            synchronize_berkeley(context, reference_socket, server_id)
+            return
+        if COORDINATOR_NAME is None:
+            return
+
+    response = peer_exchange(
+        context,
+        COORDINATOR_NAME,
+        "clock_request",
+        chat_pb2.ClockRequest(server_name=server_id),
+    )
+    if (
+        response is None
+        or not response.HasField("clock_response")
+        or not response.clock_response.is_coordinator
+    ):
+        start_election(context, reference_socket, publisher, server_id, server_rank)
+    else:
+        set_clock(response.sent_at_unix_ms)
+
+
+def listen_for_coordinator(context):
+    global COORDINATOR_NAME
+    subscriber = context.socket(zmq.SUB)
+    subscriber.connect("tcp://proxy:5558")
+    subscriber.setsockopt(zmq.SUBSCRIBE, b"servers")
+
+    while True:
+        _, raw_message = subscriber.recv_multipart()
+        message = chat_pb2.Envelope()
+        message.ParseFromString(raw_message)
+        update_logical_clock(message)
+        print(
+            f"Recebida no topico servers: "
+            f"{text_format.MessageToString(message, as_one_line=True)}",
+            flush=True,
+        )
+        if message.HasField("coordinator_announcement"):
+            COORDINATOR_NAME = message.coordinator_announcement.server_name
+            print(f"Coordenador atual: {COORDINATOR_NAME}", flush=True)
 
 
 def create_database():
@@ -179,6 +343,7 @@ def handle_request(request, connection, server_id, publisher):
 
 
 def main():
+    global SERVER_RANK, ACTIVE_SERVERS
     server_id = sys.argv[1]
     connection = create_database()
 
@@ -195,16 +360,21 @@ def main():
         "register_server_request",
         chat_pb2.RegisterServerRequest(server_name=server_id),
     )
-    server_rank = registration.register_server_response.rank
-    server_list = reference_exchange(
-        reference_socket,
-        "list_servers_request",
-        chat_pb2.ListServersRequest(),
-    )
+    SERVER_RANK = registration.register_server_response.rank
+    ACTIVE_SERVERS = get_active_servers(reference_socket)
     print(
-        f"Servidor {server_id}, rank {server_rank}; servidores ativos: "
-        f"{[server.server_name for server in server_list.list_servers_response.servers]}",
+        f"Servidor {server_id}, rank {SERVER_RANK}; servidores ativos: "
+        f"{[server.server_name for server in ACTIVE_SERVERS]}",
         flush=True,
+    )
+
+    subscriber_thread = threading.Thread(
+        target=listen_for_coordinator, args=(context,), daemon=True
+    )
+    subscriber_thread.start()
+    time.sleep(1)
+    start_election(
+        context, reference_socket, publisher, server_id, SERVER_RANK
     )
 
     try:
@@ -218,16 +388,60 @@ def main():
                 f"Recebida: {text_format.MessageToString(request, as_one_line=True)}",
                 flush=True,
             )
-            response = handle_request(request, connection, server_id, publisher)
+            payload = request.WhichOneof("payload")
+            start_new_election = False
+
+            if payload == "clock_request":
+                if COORDINATOR_NAME == server_id:
+                    clock_request = request.clock_request
+                    response = synchronize_berkeley(
+                        context,
+                        reference_socket,
+                        server_id,
+                        clock_request.server_name,
+                        request.sent_at_unix_ms,
+                    )
+                else:
+                    response = make_envelope(
+                        "clock_response", chat_pb2.ClockResponse(is_coordinator=False)
+                    )
+            elif payload == "election_request":
+                election = request.election_request
+                accepted = election.rank < SERVER_RANK
+                response = make_envelope(
+                    "election_response",
+                    chat_pb2.ElectionResponse(accepted=accepted),
+                )
+                start_new_election = accepted
+            else:
+                response = handle_request(request, connection, server_id, publisher)
+
             print(
                 f"Enviada: {text_format.MessageToString(response, as_one_line=True)}",
                 flush=True,
             )
             socket.send(response.SerializeToString())
-            client_message_count += 1
-            if client_message_count == 10:
-                synchronize_clock(reference_socket, server_id)
-                client_message_count = 0
+            if start_new_election:
+                start_election(
+                    context, reference_socket, publisher, server_id, SERVER_RANK
+                )
+
+            if payload not in ("clock_request", "election_request"):
+                client_message_count += 1
+                if client_message_count % 10 == 0:
+                    reference_exchange(
+                        reference_socket,
+                        "heartbeat_request",
+                        chat_pb2.HeartbeatRequest(server_name=server_id),
+                    )
+                if client_message_count % 15 == 0:
+                    synchronize_with_coordinator(
+                        context,
+                        reference_socket,
+                        publisher,
+                        server_id,
+                        SERVER_RANK,
+                    )
     finally:
         connection.close()
         socket.close()
