@@ -10,6 +10,7 @@ import chat_pb2
 
 
 LOGICAL_CLOCK = 0
+LOGICAL_CLOCK_LOCK = threading.Lock()
 CLOCK_OFFSET_MS = 0
 COORDINATOR_NAME = None
 SERVER_RANK = 0
@@ -22,17 +23,148 @@ def now_unix_ms():
 
 def update_logical_clock(message):
     global LOGICAL_CLOCK
-    LOGICAL_CLOCK = max(LOGICAL_CLOCK, message.logical_clock)
+    with LOGICAL_CLOCK_LOCK:
+        LOGICAL_CLOCK = max(LOGICAL_CLOCK, message.logical_clock)
 
 
 def make_envelope(payload_field, payload):
     global LOGICAL_CLOCK
-    LOGICAL_CLOCK += 1
+    with LOGICAL_CLOCK_LOCK:
+        LOGICAL_CLOCK += 1
+        logical_clock = LOGICAL_CLOCK
     envelope = chat_pb2.Envelope(
-        sent_at_unix_ms=now_unix_ms(), logical_clock=LOGICAL_CLOCK
+        sent_at_unix_ms=now_unix_ms(), logical_clock=logical_clock
     )
     getattr(envelope, payload_field).CopyFrom(payload)
     return envelope
+
+
+def publish_replication(publisher, record_type, record):
+    event = chat_pb2.ReplicationEvent()
+    getattr(event, record_type).CopyFrom(record)
+    envelope = make_envelope("replication_event", event)
+    publisher.send_multipart([b"replication", envelope.SerializeToString()])
+    print(
+        f"Replicacao enviada: {text_format.MessageToString(envelope, as_one_line=True)}",
+        flush=True,
+    )
+
+
+def insert_login(connection, record):
+    connection.execute(
+        "INSERT INTO logins "
+        "SELECT ?, ?, ? WHERE NOT EXISTS ("
+        "SELECT 1 FROM logins WHERE username = ? AND timestamp_unix_ms = ? "
+        "AND origin_server = ?)",
+        (
+            record.username,
+            record.timestamp_unix_ms,
+            record.origin_server,
+            record.username,
+            record.timestamp_unix_ms,
+            record.origin_server,
+        ),
+    )
+
+
+def insert_channel(connection, record):
+    connection.execute(
+        "INSERT OR IGNORE INTO channels VALUES (?, ?, ?, ?)",
+        (
+            record.name,
+            record.created_by,
+            record.created_at_unix_ms,
+            record.origin_server,
+        ),
+    )
+
+
+def insert_publication(connection, record):
+    connection.execute(
+        "INSERT INTO publications "
+        "SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+        "SELECT 1 FROM publications WHERE username = ? AND channel_name = ? "
+        "AND request_sent_at_unix_ms = ? AND origin_server = ?)",
+        (
+            record.username,
+            record.channel_name,
+            record.message,
+            record.request_sent_at_unix_ms,
+            record.received_at_unix_ms,
+            record.published_at_unix_ms,
+            record.origin_server,
+            record.username,
+            record.channel_name,
+            record.request_sent_at_unix_ms,
+            record.origin_server,
+        ),
+    )
+
+
+def apply_replication_event(connection, event):
+    record_type = event.WhichOneof("record")
+    record = getattr(event, record_type)
+    if record_type == "login":
+        insert_login(connection, record)
+    elif record_type == "channel":
+        insert_channel(connection, record)
+    elif record_type == "publication":
+        insert_publication(connection, record)
+    connection.commit()
+
+
+def make_replication_snapshot(connection, server_id):
+    snapshot = chat_pb2.ReplicationSnapshot(server_name=server_id)
+    for row in connection.execute(
+        "SELECT username, timestamp_unix_ms, origin_server FROM logins"
+    ):
+        snapshot.logins.add(
+            username=row[0], timestamp_unix_ms=row[1], origin_server=row[2]
+        )
+    for row in connection.execute(
+        "SELECT name, created_by, created_at_unix_ms, origin_server FROM channels"
+    ):
+        snapshot.channels.add(
+            name=row[0],
+            created_by=row[1],
+            created_at_unix_ms=row[2],
+            origin_server=row[3],
+        )
+    for row in connection.execute(
+        "SELECT username, channel_name, message, request_sent_at_unix_ms, "
+        "received_at_unix_ms, published_at_unix_ms, origin_server FROM publications"
+    ):
+        snapshot.publications.add(
+            username=row[0],
+            channel_name=row[1],
+            message=row[2],
+            request_sent_at_unix_ms=row[3],
+            received_at_unix_ms=row[4],
+            published_at_unix_ms=row[5],
+            origin_server=row[6],
+        )
+    return snapshot
+
+
+def publish_snapshot(publisher, connection, server_id):
+    envelope = make_envelope(
+        "replication_snapshot", make_replication_snapshot(connection, server_id)
+    )
+    publisher.send_multipart([b"replication", envelope.SerializeToString()])
+    print(
+        f"Snapshot enviado: {text_format.MessageToString(envelope, as_one_line=True)}",
+        flush=True,
+    )
+
+
+def apply_replication_snapshot(connection, snapshot):
+    for record in snapshot.logins:
+        insert_login(connection, record)
+    for record in snapshot.channels:
+        insert_channel(connection, record)
+    for record in snapshot.publications:
+        insert_publication(connection, record)
+    connection.commit()
 
 
 def reference_exchange(reference_socket, payload_field, payload):
@@ -206,25 +338,43 @@ def synchronize_with_coordinator(
         set_clock(response.sent_at_unix_ms)
 
 
-def listen_for_coordinator(context):
+def listen_for_server_messages(context, server_id):
     global COORDINATOR_NAME
+    connection = create_database()
     subscriber = context.socket(zmq.SUB)
     subscriber.connect("tcp://proxy:5558")
     subscriber.setsockopt(zmq.SUBSCRIBE, b"servers")
+    subscriber.setsockopt(zmq.SUBSCRIBE, b"replication")
 
     while True:
-        _, raw_message = subscriber.recv_multipart()
+        topic, raw_message = subscriber.recv_multipart()
         message = chat_pb2.Envelope()
         message.ParseFromString(raw_message)
         update_logical_clock(message)
-        print(
-            f"Recebida no topico servers: "
-            f"{text_format.MessageToString(message, as_one_line=True)}",
-            flush=True,
-        )
-        if message.HasField("coordinator_announcement"):
-            COORDINATOR_NAME = message.coordinator_announcement.server_name
-            print(f"Coordenador atual: {COORDINATOR_NAME}", flush=True)
+        if topic == b"servers":
+            print(
+                f"Recebida no topico servers: "
+                f"{text_format.MessageToString(message, as_one_line=True)}",
+                flush=True,
+            )
+            if message.HasField("coordinator_announcement"):
+                COORDINATOR_NAME = message.coordinator_announcement.server_name
+                print(f"Coordenador atual: {COORDINATOR_NAME}", flush=True)
+        elif topic == b"replication":
+            if message.HasField("replication_event"):
+                event = message.replication_event
+                record = getattr(event, event.WhichOneof("record"))
+                if record.origin_server != server_id:
+                    apply_replication_event(connection, event)
+            elif message.HasField("replication_snapshot"):
+                snapshot = message.replication_snapshot
+                if snapshot.server_name != server_id:
+                    apply_replication_snapshot(connection, snapshot)
+            print(
+                f"Replicacao recebida: "
+                f"{text_format.MessageToString(message, as_one_line=True)}",
+                flush=True,
+            )
 
 
 def create_database():
@@ -262,11 +412,14 @@ def handle_request(request, connection, server_id, publisher):
 
     if payload == "login_request":
         username = request.login_request.username
-        connection.execute(
-            "INSERT INTO logins VALUES (?, ?, ?)",
-            (username, request.sent_at_unix_ms, server_id),
+        record = chat_pb2.LoginRecord(
+            username=username,
+            timestamp_unix_ms=request.sent_at_unix_ms,
+            origin_server=server_id,
         )
+        insert_login(connection, record)
         connection.commit()
+        publish_replication(publisher, "login", record)
         response = chat_pb2.LoginResponse(success=True)
         return make_envelope("login_response", response)
 
@@ -282,6 +435,14 @@ def handle_request(request, connection, server_id, publisher):
         response.success = cursor.rowcount == 1
         if not response.success:
             response.error = "Ja existe um canal com esse nome."
+        else:
+            record = chat_pb2.ChannelRecord(
+                name=channel_name,
+                created_by=username,
+                created_at_unix_ms=request.sent_at_unix_ms,
+                origin_server=server_id,
+            )
+            publish_replication(publisher, "channel", record)
         return make_envelope("create_channel_response", response)
 
     if payload == "list_channels_request":
@@ -303,7 +464,6 @@ def handle_request(request, connection, server_id, publisher):
             return make_envelope("publish_response", response)
 
         received_at = now_unix_ms()
-        published_at = now_unix_ms()
         message = make_envelope(
             "channel_message",
             chat_pb2.ChannelMessage(
@@ -313,19 +473,18 @@ def handle_request(request, connection, server_id, publisher):
             ),
         )
         published_at = message.sent_at_unix_ms
-        connection.execute(
-            "INSERT INTO publications VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                publication.username,
-                publication.channel_name,
-                publication.message,
-                request.sent_at_unix_ms,
-                received_at,
-                published_at,
-                server_id,
-            ),
+        record = chat_pb2.PublicationRecord(
+            username=publication.username,
+            channel_name=publication.channel_name,
+            message=publication.message,
+            request_sent_at_unix_ms=request.sent_at_unix_ms,
+            received_at_unix_ms=received_at,
+            published_at_unix_ms=published_at,
+            origin_server=server_id,
         )
+        insert_publication(connection, record)
         connection.commit()
+        publish_replication(publisher, "publication", record)
         publisher.send_multipart(
             [publication.channel_name.encode(), message.SerializeToString()]
         )
@@ -369,10 +528,11 @@ def main():
     )
 
     subscriber_thread = threading.Thread(
-        target=listen_for_coordinator, args=(context,), daemon=True
+        target=listen_for_server_messages, args=(context, server_id), daemon=True
     )
     subscriber_thread.start()
     time.sleep(1)
+    publish_snapshot(publisher, connection, server_id)
     start_election(
         context, reference_socket, publisher, server_id, SERVER_RANK
     )
@@ -434,6 +594,7 @@ def main():
                         "heartbeat_request",
                         chat_pb2.HeartbeatRequest(server_name=server_id),
                     )
+                    publish_snapshot(publisher, connection, server_id)
                 if client_message_count % 15 == 0:
                     synchronize_with_coordinator(
                         context,
