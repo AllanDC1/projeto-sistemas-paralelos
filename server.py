@@ -1,5 +1,7 @@
+import queue
 import sqlite3
 import sys
+import threading
 import time
 
 import zmq
@@ -11,6 +13,8 @@ from common import log, receive, stamp
 server_name = sys.argv[1]
 coordinator = None
 message_count = 0
+election_lock = threading.Lock()
+election_results = queue.Queue()
 
 db = sqlite3.connect("/data/server.sqlite")
 db.executescript(
@@ -31,16 +35,16 @@ sub = context.socket(zmq.SUB)
 sub.connect("tcp://proxy:5558")
 sub.setsockopt(zmq.SUBSCRIBE, b"servers")
 sub.setsockopt(zmq.SUBSCRIBE, b"replication")
-reference = context.socket(zmq.REQ)
-reference.connect("tcp://reference:5559")
-
-
 def call_reference(**payload):
+    reference = context.socket(zmq.REQ)
+    reference.setsockopt(zmq.LINGER, 0)
+    reference.connect("tcp://reference:5559")
     request = stamp(**payload)
     log("-> reference", request)
     reference.send(request.SerializeToString())
     response = receive(reference.recv())
     log("<- reference", response)
+    reference.close()
     return response
 
 
@@ -69,22 +73,26 @@ def publish(topic, **payload):
 
 
 def elect():
+    try:
+        servers = call_reference(
+            list_servers_request=chat_pb2.ListServersRequest()
+        ).list_servers_response.servers
+        answers = [
+            ask_peer(server.server_name, election_request=chat_pb2.ElectionRequest())
+            for server in servers
+            if server.rank > rank
+        ]
+        if all(answer is None for answer in answers):
+            election_results.put(server_name)
+    finally:
+        election_lock.release()
+
+
+def start_election():
     global coordinator
-    coordinator = None
-    servers = call_reference(
-        list_servers_request=chat_pb2.ListServersRequest()
-    ).list_servers_response.servers
-    answers = [
-        ask_peer(server.server_name, election_request=chat_pb2.ElectionRequest())
-        for server in servers
-        if server.rank > rank
-    ]
-    if all(answer is None for answer in answers):
-        coordinator = server_name
-        publish(
-            "servers",
-            coordinator_announcement=chat_pb2.CoordinatorAnnouncement(server_name=server_name),
-        )
+    if election_lock.acquire(blocking=False):
+        coordinator = None
+        threading.Thread(target=elect, daemon=True).start()
 
 
 def sync_clock():
@@ -180,7 +188,7 @@ rank = call_reference(
     register_server_request=chat_pb2.RegisterServerRequest(server_name=server_name)
 ).register_server_response.rank
 print(f"{server_name} registrado com rank {rank}", flush=True)
-elect()
+start_election()
 work.connect("tcp://broker:5556")
 
 poller = zmq.Poller()
@@ -188,7 +196,18 @@ for s in (work, peer, sub):
     poller.register(s, zmq.POLLIN)
 
 while True:
-    ready = dict(poller.poll())
+    ready = dict(poller.poll(100))
+
+    while True:
+        try:
+            candidate = election_results.get_nowait()
+        except queue.Empty:
+            break
+        coordinator = candidate
+        publish(
+            "servers",
+            coordinator_announcement=chat_pb2.CoordinatorAnnouncement(server_name=candidate),
+        )
 
     if work in ready:
         request = receive(work.recv())
@@ -213,7 +232,7 @@ while True:
         log("-> servidor", response)
         peer.send(response.SerializeToString())
         if is_election:
-            elect()
+            start_election()
 
     if sub in ready:
         topic, data = sub.recv_multipart()
