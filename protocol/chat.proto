@@ -7,32 +7,32 @@ option java_multiple_files = true;
 
 message Envelope {
   int64 sent_at_unix_ms = 1;
-  int64 logical_clock = 12;
+  int64 logical_clock = 2;
 
   oneof payload {
-    LoginRequest login_request = 2;
-    LoginResponse login_response = 3;
-    CreateChannelRequest create_channel_request = 4;
-    CreateChannelResponse create_channel_response = 5;
-    ListChannelsRequest list_channels_request = 6;
-    ChannelListResponse channel_list_response = 7;
-    ErrorResponse error_response = 8;
+    LoginRequest login_request = 3;
+    LoginResponse login_response = 4;
+    CreateChannelRequest create_channel_request = 5;
+    CreateChannelResponse create_channel_response = 6;
+    ListChannelsRequest list_channels_request = 7;
+    ListChannelsResponse list_channels_response = 8;
     PublishRequest publish_request = 9;
     PublishResponse publish_response = 10;
     ChannelMessage channel_message = 11;
-    RegisterServerRequest register_server_request = 13;
-    RegisterServerResponse register_server_response = 14;
-    ListServersRequest list_servers_request = 15;
-    ListServersResponse list_servers_response = 16;
-    HeartbeatRequest heartbeat_request = 17;
-    HeartbeatResponse heartbeat_response = 18;
-    ClockRequest clock_request = 19;
-    ClockResponse clock_response = 20;
-    ElectionRequest election_request = 21;
-    ElectionResponse election_response = 22;
-    CoordinatorAnnouncement coordinator_announcement = 23;
-    ReplicationEvent replication_event = 24;
-    ReplicationSnapshot replication_snapshot = 25;
+    HistoryRequest history_request = 12;
+    HistoryResponse history_response = 13;
+    RegisterServerRequest register_server_request = 14;
+    RegisterServerResponse register_server_response = 15;
+    ListServersRequest list_servers_request = 16;
+    ListServersResponse list_servers_response = 17;
+    HeartbeatRequest heartbeat_request = 18;
+    HeartbeatResponse heartbeat_response = 19;
+    ClockRequest clock_request = 20;
+    ClockResponse clock_response = 21;
+    ElectionRequest election_request = 22;
+    ElectionResponse election_response = 23;
+    CoordinatorAnnouncement coordinator_announcement = 24;
+    ReplicationEvent replication_event = 25;
   }
 }
 
@@ -53,19 +53,14 @@ message CreateChannelRequest {
 message CreateChannelResponse {
   bool success = 1;
   string error = 2;
-  string channel_name = 3;
 }
 
 message ListChannelsRequest {
   string username = 1;
 }
 
-message ChannelListResponse {
+message ListChannelsResponse {
   repeated string channels = 1;
-}
-
-message ErrorResponse {
-  string error = 1;
 }
 
 message PublishRequest {
@@ -83,6 +78,15 @@ message ChannelMessage {
   string username = 1;
   string channel_name = 2;
   string message = 3;
+  int64 sent_at_unix_ms = 4;
+}
+
+message HistoryRequest {
+  string channel_name = 1;
+}
+
+message HistoryResponse {
+  repeated ChannelMessage messages = 1;
 }
 
 message RegisterServerRequest {
@@ -108,66 +112,21 @@ message HeartbeatRequest {
   string server_name = 1;
 }
 
-message HeartbeatResponse {
-  bool success = 1;
-}
+message HeartbeatResponse {}
 
-message ClockRequest {
-  string server_name = 1;
-}
+message ClockRequest {}
 
-message ClockResponse {
-  bool is_coordinator = 1;
-}
+message ClockResponse {}
 
-message ElectionRequest {
-  string server_name = 1;
-  int32 rank = 2;
-}
+message ElectionRequest {}
 
-message ElectionResponse {
-  bool accepted = 1;
-}
+message ElectionResponse {}
 
 message CoordinatorAnnouncement {
   string server_name = 1;
-  int32 rank = 2;
-}
-
-message LoginRecord {
-  string username = 1;
-  int64 timestamp_unix_ms = 2;
-  string origin_server = 3;
-}
-
-message ChannelRecord {
-  string name = 1;
-  string created_by = 2;
-  int64 created_at_unix_ms = 3;
-  string origin_server = 4;
-}
-
-message PublicationRecord {
-  string username = 1;
-  string channel_name = 2;
-  string message = 3;
-  int64 request_sent_at_unix_ms = 4;
-  int64 received_at_unix_ms = 5;
-  int64 published_at_unix_ms = 6;
-  string origin_server = 7;
 }
 
 message ReplicationEvent {
-  oneof record {
-    LoginRecord login = 1;
-    ChannelRecord channel = 2;
-    PublicationRecord publication = 3;
-  }
-}
-
-message ReplicationSnapshot {
-  string server_name = 1;
-  repeated LoginRecord logins = 2;
-  repeated ChannelRecord channels = 3;
-  repeated PublicationRecord publications = 4;
+  string origin_server = 1;
+  Envelope request = 2;
 }

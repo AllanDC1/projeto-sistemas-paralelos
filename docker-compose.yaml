@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.python
     command: ["python", "server.py", "server-1"]
     depends_on:
+      - broker
       - proxy
       - reference
     volumes:
@@ -16,6 +17,7 @@ services:
       dockerfile: Dockerfile.python
     command: ["python", "server.py", "server-2"]
     depends_on:
+      - broker
       - proxy
       - reference
     volumes:
@@ -28,9 +30,6 @@ services:
     command: ["python", "broker.py"]
     ports:
       - "5555:5555"
-    depends_on:
-      - server-1
-      - server-2
 
   proxy:
     build:
