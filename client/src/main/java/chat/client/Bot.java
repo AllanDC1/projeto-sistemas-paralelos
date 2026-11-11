@@ -26,6 +26,8 @@ public final class Bot {
     public static void main(String[] args) throws Exception {
         String username = args[0];
 
+        Thread.sleep(5000);
+
         try (ZContext context = new ZContext()) {
             ZMQ.Socket server = context.createSocket(SocketType.REQ);
             server.connect("tcp://broker:5555");
@@ -58,9 +60,9 @@ public final class Bot {
                                     .setUsername(username)
                                     .setChannelName(channel)
                                     .setMessage("mensagem " + RANDOM.nextInt(1000))));
-                    receivePublications(subscriber);
-                    Thread.sleep(1000);
+                    pause(subscriber, 1000);
                 }
+                pause(subscriber, 10000);
             }
         }
     }
@@ -84,6 +86,14 @@ public final class Bot {
         Envelope envelope = Envelope.parseFrom(data);
         logicalClock = Math.max(logicalClock, envelope.getLogicalClock());
         return envelope;
+    }
+
+    private static void pause(ZMQ.Socket subscriber, long millis) throws Exception {
+        long end = System.currentTimeMillis() + millis;
+        while (System.currentTimeMillis() < end) {
+            receivePublications(subscriber);
+            Thread.sleep(50);
+        }
     }
 
     private static void receivePublications(ZMQ.Socket subscriber) throws Exception {
